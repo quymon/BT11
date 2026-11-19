@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Bài tập Toán tương tác - Học sinh</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/rrweb@1.1.3/dist/rrweb.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #f0f4f8; padding: 20px; max-width: 650px; margin: auto; }
+    .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); margin-bottom: 16px; }
+    .question { border-left: 4px solid #3b82f6; padding-left: 12px; margin-bottom: 20px; transition: transform 0.2s; }
+    .question:hover { transform: translateX(4px); }
+    button { background: #2563eb; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 16px; }
+    button:hover { background: #1d4ed8; }
+    input[type="text"] { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 15px; }
+    #login-screen { text-align: center; margin-top: 60px; }
+    #quiz-screen { display: none; }
+    .badge { display: inline-block; background: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 20px; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+  <!-- Màn hình nhập tên (Sau này tích hợp ClassIn sẽ tự lấy tên từ URL) -->
+  <div id="login-screen" class="card">
+    <h2>Nhập tên của con để bắt đầu làm bài</h2>
+    <input type="text" id="student-name-input" placeholder="Ví dụ: Minh Anh" />
+    <button onclick="startQuiz()">Vào làm bài</button>
+  </div>
+
+  <!-- Màn hình bài tập tương tác -->
+  <div id="quiz-screen">
+    <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+      <div>Học sinh: <strong id="display-name"></strong></div>
+      <span class="badge">● Đang kết nối với cô giáo</span>
+    </div>
+
+    <div class="card">
+      <div class="question" onclick="updateCurrentQuestion('Câu 1')">
+        <h3>Câu 1: Kết quả của phép tính 15 × 4 là bao nhiêu?</h3>
+        <label><input type="radio" name="q1" value="50" onchange="updateCurrentQuestion('Câu 1')"> A. 50</label><br><br>
+        <label><input type="radio" name="q1" value="60" onchange="updateCurrentQuestion('Câu 1')"> B. 60</label><br><br>
+        <label><input type="radio" name="q1" value="45" onchange="updateCurrentQuestion('Câu 1')"> C. 45</label>
+      </div>
+
+      <div class="question" onclick="updateCurrentQuestion('Câu 2')">
+        <h3>Câu 2: Điền số thích hợp vào chỗ trống: 120 + ___ = 200</h3>
+        <input type="text" id="q2-input" placeholder="Nhập đáp án..." oninput="updateCurrentQuestion('Câu 2')" />
+      </div>
+
+      <button id="submit-btn" onclick="submitQuiz()">Nộp bài cho cô</button>
+      <p id="result-msg" style="font-weight:bold; color:#16a34a;"></p>
+    </div>
+  </div>
+
+  <script>
+    // === CẤU HÌNH SUPABASE CỦA BẠN ===
+    const SUPABASE_URL = 'https://qszwqiyppioufaohauen.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFzendxaXlwcGlvdWZhb2hhdWVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ5MzI1MDgsImV4cCI6MjExMDUwODUwOH0.Q1R-M5dOnc0ipp3SfSUutF5FniLAkFPEJdmdj0nKBro';
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    let studentName = '';
+    let roomChannel = null;
+    let eventBuffer = [];
+
+    function setConnectionBadge(text, isError = false) {
+      const badge = document.querySelector('.badge');
+      badge.innerText = text;
+      badge.style.background = isError ? '#fee2e2' : '#dcfce7';
+      badge.style.color = isError ? '#991b1b' : '#166534';
+    }
+
+    async function startQuiz() {
+      const input = document.getElementById('student-name-input').value.trim();
+      if (!input) return alert('Con hãy nhập tên trước nhé!');
+      studentName = input;
+
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('quiz-screen').style.display = 'block';
+      document.getElementById('display-name').innerText = studentName;
+      setConnectionBadge('● Đang kết nối máy chủ...');
+
+      // 1. Lưu trạng thái bắt đầu làm bài vào Database
+      const { error: dbError } = await sb.from('submissions').upsert({
+        student_name: studentName,
+        current_question: 'Câu 1',
+        status: 'Đang làm bài',
+        score: 0,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'student_name' });
+
+      if (dbError) {
+        console.error('Lỗi DB:', dbError);
+        setConnectionBadge('✖ Lỗi lưu dữ liệu: ' + dbError.message, true);
+        return;
+      }
+
+      // 2. Kết nối kênh Realtime để truyền màn hình trực tiếp
+      roomChannel = sb.channel('lop-hoc-demo', {
+        config: { presence: { key: studentName } }
+      });
+
+      roomChannel.on('broadcast', { event: 'request_snapshot' }, ({ payload }) => {
+        if (payload.target === studentName && window.rrweb) {
+          rrweb.record.takeFullSnapshot();
+        }
+      });
+
+      roomChannel.subscribe(async (status, err) => {
+        console.log('Trạng thái WebSocket:', status, err);
+        if (status === 'SUBSCRIBED') {
+          setConnectionBadge('● Đã kết nối trực tiếp với cô giáo');
+          await roomChannel.track({ online_at: new Date().toISOString() });
+          startScreenRecording();
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          setConnectionBadge('✖ Lỗi kênh trực tiếp: ' + status, true);
+        }
+      });
+    }
+
+    function startScreenRecording() {
+      if (!window.rrweb) {
+        setConnectionBadge('✖ Không tải được thư viện rrweb', true);
+        return;
+      }
+
+      rrweb.record({
+        emit(event) {
+          eventBuffer.push(event);
+        }
+      });
+
+      setInterval(() => {
+        if (eventBuffer.length > 0 && roomChannel) {
+          roomChannel.send({
+            type: 'broadcast',
+            event: 'rrweb_events',
+            payload: { student: studentName, events: eventBuffer }
+          });
+          eventBuffer = [];
+        }
+      }, 300);
+    }
+
+    let lastReportedQ = '';
+    async function updateCurrentQuestion(qName) {
+      if (lastReportedQ === qName) return;
+      lastReportedQ = qName;
+      await sb.from('submissions').update({
+        current_question: qName,
+        updated_at: new Date().toISOString()
+      }).eq('student_name', studentName);
+    }
+
+    async function submitQuiz() {
+      const q1 = document.querySelector('input[name="q1"]:checked')?.value || 'Chưa chọn';
+      const q2 = document.getElementById('q2-input').value.trim() || 'Trống';
+
+      let score = 0;
+      if (q1 === '60') score += 5;
+      if (q2 === '80') score += 5;
+
+      await sb.from('submissions').update({
+        status: 'Đã nộp bài',
+        current_question: 'Hoàn thành',
+        score: score,
+        answers: { 'Câu 1': q1, 'Câu 2': q2 },
+        updated_at: new Date().toISOString()
+      }).eq('student_name', studentName);
+
+      document.getElementById('submit-btn').disabled = true;
+      document.getElementById('result-msg').innerText = `Đã nộp bài thành công! Điểm của con: ${score}/10`;
+    }
+  </script>
+</body>
+</html>
